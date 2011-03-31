@@ -8,6 +8,8 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.net.MalformedURLException;
 import java.net.URL;
+import java.util.Set;
+import java.util.TreeSet;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -23,73 +25,90 @@ import com.google.gdata.data.MediaContent;
 import com.google.gdata.data.PlainTextConstruct;
 import com.google.gdata.data.acl.AclEntry;
 import com.google.gdata.data.acl.AclFeed;
+import com.google.gdata.data.docs.DocumentEntry;
 import com.google.gdata.data.docs.DocumentListEntry;
 import com.google.gdata.data.docs.DocumentListFeed;
+import com.google.gdata.data.docs.FolderEntry;
+import com.google.gdata.data.docs.PdfEntry;
+import com.google.gdata.data.docs.PresentationEntry;
+import com.google.gdata.data.docs.SpreadsheetEntry;
 import com.google.gdata.data.media.MediaSource;
 import com.google.gdata.util.AuthenticationException;
 import com.google.gdata.util.ServiceException;
 
 public class GoogleDocMigration {
 
+    private static final String SPREADSHEET_EXPORT_URL_PATTERN =
+        "https://spreadsheets.google.com/feeds/download/spreadsheets/Export?key=%s&exportFormat=xls";
+
     private static final Logger LOG = LoggerFactory.getLogger(GoogleDocMigration.class);
 
-    private static final String DOC_FEED_ROOT = "https://docs.google.com/feeds/default/private/full/";
+    private static final String MIGRATION_TAG_FOLDER_NAME = "GDM-MigratedTag";
+
+    private static final String DOC_FEED_ROOT =
+        "https://docs.google.com/feeds/default/private/full/";
 
     private static final String DOCS_OWNED_BY_ME = DOC_FEED_ROOT + "-/mine";
 
     private static final String DOCS_SHARED_WITH_ME = DOC_FEED_ROOT + "-/-mine";
 
-    private DocsService origDocService;
+    private DocsService origDocsService;
 
-    private DocsService desgDocService;
+    private DocsService destDocsService;
 
-    private SpreadsheetService origSpreadsheetService;
+    private UserToken origDocsServiceToken;
 
-    private SpreadsheetService destSpreadsheetService;
+    private UserToken origSpreadsheetToken;
 
     public void migrateMyDocuments() {
+
         LOG.info("Migrating Documents Owned By Me");
 
         try {
             URL feedUri = new URL(DOCS_OWNED_BY_ME);
-            DocumentListFeed feed = origDocService.getFeed(feedUri, DocumentListFeed.class);
+            DocumentListFeed feed = origDocsService.getFeed(feedUri, DocumentListFeed.class);
             LOG.info(format("Found %d documents to migrate", feed.getEntries().size()));
 
             for (DocumentListEntry entry : feed.getEntries()) {
-                LOG.info(format("title: %s (%s)", entry.getTitle().getPlainText(), entry.getResourceId()));
+                LOG.info(format("title: %s (%s)", entry.getTitle().getPlainText(),
+                                entry.getResourceId()));
 
+                Set<String> folders = new TreeSet<String>();
+                for (Link parentLink : entry.getParentLinks()) {
+                    folders.add(parentLink.getTitle());
+                }
+                if (!folders.isEmpty()) {
+                    LOG.info("folders: " + folders);
+                }
+
+                AclFeed aclFeed =
+                    origDocsService.getFeed(new URL(entry.getAclFeedLink().getHref()),
+                                            AclFeed.class);
+                for (AclEntry aclEntry : aclFeed.getEntries()) {
+                    LOG.info(format(" -acl role: %s -scope: %s(%s)", aclEntry.getRole().getValue(),
+                                    aclEntry.getScope().getValue(), aclEntry.getScope().getType()));
+                }
+
+                // migrate doc
                 DocumentListEntry newEntry = copyEntry(entry);
 
+                // update metadata
                 newEntry.setTitle(new PlainTextConstruct(entry.getTitle().getPlainText()));
                 newEntry.setStarred(entry.isStarred());
                 newEntry.setHidden(entry.isHidden());
                 newEntry.setWritersCanInvite(entry.isWritersCanInvite());
-
-                for (Link parentLink : entry.getParentLinks()) {
-                    System.out.println(parentLink.getTitle());
-                    System.out.println(parentLink.getRel());
-                    System.out.println(parentLink.getType());
-                    System.out.println("oldhref " + parentLink.getHref());
-
-                    String newHref = findExactMatchHrefForFolder(parentLink);
-                    System.out.println("found   " + newHref);
-                    newEntry.addLink(DocumentListEntry.PARENT_NAMESPACE,
-                                     "application/atom+xml", newHref);
-                }
-
-                AclFeed aclFeed = origDocService.getFeed(new URL(entry.getAclFeedLink().getHref()), AclFeed.class);
-                for (AclEntry aclEntry : aclFeed.getEntries()) {
-                    System.out.println(format(" - scope: %s(%s) - role: %s", aclEntry.getScope().getValue(),
-                                              aclEntry.getScope().getType(), aclEntry.getRole().getValue()));
-                }
-
                 newEntry = newEntry.update();
-                for (Link parentLink : newEntry.getParentLinks()) {
-                    System.out.println(parentLink.getTitle());
-                    System.out.println(parentLink.getRel());
-                    System.out.println(parentLink.getType());
-                    System.out.println("newhref " + parentLink.getHref());
+
+                // synchronize folders
+                for (String folderName : folders) {
+                    LOG.debug("adding to folder: " + folderName);
+                    newEntry = addToFolder(newEntry, findExactEntryForFolder(folderName));
                 }
+
+                // update ACL
+
+                // mark doc as done with a tag folder
+                newEntry = addToFolder(newEntry, createMigrationTagFolderIfNeeded());
 
                 break;
             }
@@ -102,30 +121,70 @@ public class GoogleDocMigration {
         }
     }
 
-    private String findExactMatchHrefForFolder(Link parentLink) throws MalformedURLException, IOException,
+    private DocumentListEntry createMigrationTagFolderIfNeeded() throws IOException,
         ServiceException {
+
+        DocumentListEntry tagFolder = findExactEntryForFolder(MIGRATION_TAG_FOLDER_NAME);
+        if (tagFolder != null)
+            return tagFolder;
+
+        DocumentListEntry newEntry = new FolderEntry();
+        newEntry.setTitle(new PlainTextConstruct(MIGRATION_TAG_FOLDER_NAME));
+        URL feedUrl = new URL(DOC_FEED_ROOT);
+
+        LOG.info("Creating migration tag folder");
+        return origDocsService.insert(feedUrl, newEntry);
+    }
+
+    private DocumentListEntry findExactEntryForFolder(String folderName)
+        throws MalformedURLException, IOException, ServiceException {
+
         URL searchFeedUri = new URL(DOC_FEED_ROOT + "-/folder");
         DocumentQuery query = new DocumentQuery(searchFeedUri);
-        query.setTitleQuery(parentLink.getTitle());
+        query.setTitleQuery(folderName);
         query.setTitleExact(true);
-        query.setMaxResults(10);
-        DocumentListFeed searchFeed = origDocService.getFeed(query, DocumentListFeed.class);
+        DocumentListFeed searchFeed = origDocsService.getFeed(query, DocumentListFeed.class);
         if (searchFeed.getEntries().size() == 1)
-            return searchFeed.getEntries().get(0).getSelfLink().getHref();
+            return searchFeed.getEntries().get(0);
         return null;
     }
 
-    private DocumentListEntry copyEntry(DocumentListEntry entry) throws MalformedURLException, IOException,
-        ServiceException {
+    public DocumentListEntry addToFolder(DocumentListEntry sourceEntry,
+                                         DocumentListEntry destFolderEntry) throws IOException,
+        MalformedURLException, ServiceException {
+
+        DocumentListEntry newEntry = null;
+
+        String docType = sourceEntry.getType();
+        if (docType.equals("spreadsheet")) {
+            newEntry = new SpreadsheetEntry();
+        } else if (docType.equals("document")) {
+            newEntry = new DocumentEntry();
+        } else if (docType.equals("presentation")) {
+            newEntry = new PresentationEntry();
+        } else if (docType.equals("pdf")) {
+            newEntry = new PdfEntry();
+        } else if (docType.equals("folder")) {
+            newEntry = new FolderEntry();
+        } else {
+            newEntry = new DocumentListEntry(); // Unknown type
+        }
+        newEntry.setId(sourceEntry.getId());
+
+        String destFolderUri = ((MediaContent) destFolderEntry.getContent()).getUri();
+
+        return origDocsService.insert(new URL(destFolderUri), newEntry);
+    }
+
+    private DocumentListEntry copyEntry(DocumentListEntry entry) throws MalformedURLException,
+        IOException, ServiceException {
+
         String entryType = entry.getType();
         if (entryType.equals("spreadsheet"))
-            // spreadsheet
             return copySpreadsheet(entry.getResourceId());
         else if (entryType.equals("document"))
-            // doc
             return null;
         else if (entryType.equals("presentation"))
-            // presentation
             return null;
         else if (entryType.equals("pdf"))
             return null;
@@ -133,35 +192,37 @@ public class GoogleDocMigration {
             return null;
     }
 
-    private DocumentListEntry copySpreadsheet(String resourceId) throws IOException, MalformedURLException,
-        ServiceException {
+    private DocumentListEntry copySpreadsheet(String resourceId) throws IOException,
+        MalformedURLException, ServiceException {
+
         String docId = resourceId.substring(resourceId.lastIndexOf(":") + 1);
-        String exportUrl =
-            "https://spreadsheets.google.com/feeds/download/spreadsheets" + "/Export?key=" + docId
-                + "&exportFormat=xls";
+        origDocsService.setUserToken(origSpreadsheetToken.getValue());
 
-        UserToken docsToken = (UserToken) origDocService.getAuthTokenFactory().getAuthToken();
-        UserToken spreadsheetsToken = (UserToken) origSpreadsheetService.getAuthTokenFactory().getAuthToken();
-        origDocService.setUserToken(spreadsheetsToken.getValue());
+        String filepath = tempFile("temp.xls");
+        downloadFile(format(SPREADSHEET_EXPORT_URL_PATTERN, docId), filepath);
 
-        String filepath = System.getProperty("java.io.tmpdir") + "/" + "temp.xls";
-        downloadFile(exportUrl, filepath);
+        // Restore docs token for our Docs client
+        origDocsService.setUserToken(origDocsServiceToken.getValue());
 
-        // Restore docs token for our DocList client
-        origDocService.setUserToken(docsToken.getValue());
-
-        return uploadFile(filepath, "TemporaryTitle", new URL(DOC_FEED_ROOT));
+        return uploadFile(filepath, "Temporary Title", new URL(DOC_FEED_ROOT));
     }
 
-    public DocumentListEntry uploadFile(String filepath, String title, URL uri)
-        throws IOException, ServiceException {
+    private String tempFile(String filename) {
+
+        String filepath = System.getProperty("java.io.tmpdir") + "/" + filename;
+        return filepath;
+    }
+
+    public DocumentListEntry uploadFile(String filepath, String title, URL uri) throws IOException,
+        ServiceException {
+
         File file = new File(filepath);
         DocumentListEntry newDocument = new DocumentListEntry();
         String mimeType = DocumentListEntry.MediaType.fromFileName(file.getName()).getMimeType();
         newDocument.setFile(file, mimeType);
         newDocument.setTitle(new PlainTextConstruct(title));
 
-        DocumentListEntry newEntry = origDocService.insert(uri, newDocument);
+        DocumentListEntry newEntry = origDocsService.insert(uri, newDocument);
         if (newEntry != null) {
             file.delete();
         }
@@ -169,13 +230,12 @@ public class GoogleDocMigration {
         return newEntry;
     }
 
-    private void downloadFile(String exportUrl, String filepath)
-        throws IOException, MalformedURLException, ServiceException {
-        System.out.println("Exporting document from: " + exportUrl);
+    private void downloadFile(String exportUrl, String filepath) throws IOException,
+        MalformedURLException, ServiceException {
 
         MediaContent mc = new MediaContent();
         mc.setUri(exportUrl);
-        MediaSource ms = origDocService.getMedia(mc);
+        MediaSource ms = origDocsService.getMedia(mc);
 
         InputStream inStream = null;
         FileOutputStream outStream = null;
@@ -199,25 +259,33 @@ public class GoogleDocMigration {
         }
     }
 
-    public GoogleDocMigration(String origUsername, String origPassword, String destUsername, String destPassword) {
-        origDocService = new DocsService("yellowaxe.com-GoogleDocMigration-v1");
-        origSpreadsheetService = new SpreadsheetService("yellowaxe.com-GoogleDocMigration-v1");
+    public GoogleDocMigration(String origUsername, String origPassword, String destUsername,
+                              String destPassword) {
 
-        desgDocService = new DocsService("yellowaxe.com-GoogleDocMigration-v1");
-        destSpreadsheetService = new SpreadsheetService("yellowaxe.com-GoogleDocMigration-v1");
+        origDocsService = new DocsService("yellowaxe.com-GoogleDocMigration-v1");
+        destDocsService = new DocsService("yellowaxe.com-GoogleDocMigration-v1");
 
         try {
-            origDocService.setUserCredentials(origUsername, origPassword);
-            origSpreadsheetService.setUserCredentials(origUsername, origPassword);
+            origDocsService.setUserCredentials(origUsername, origPassword);
+            destDocsService.setUserCredentials(destUsername, destPassword);
 
-            desgDocService.setUserCredentials(destUsername, destPassword);
-            destSpreadsheetService.setUserCredentials(destUsername, destPassword);
+            // connect to spreadsheet service and save the token
+            SpreadsheetService origSpreadsheetService =
+                new SpreadsheetService("yellowaxe.com-GoogleDocMigration-v1");
+            origSpreadsheetService.setUserCredentials(origUsername, origPassword);
+            origSpreadsheetToken =
+                (UserToken) origSpreadsheetService.getAuthTokenFactory().getAuthToken();
+
+            // save the docs service token as well
+            origDocsServiceToken = (UserToken) origDocsService.getAuthTokenFactory().getAuthToken();
+
         } catch (AuthenticationException e) {
             e.printStackTrace();
         }
     }
 
     public static void main(String[] args) {
+
         CommandArgs commandArgs = new CommandArgs();
         JCommander optParser = new JCommander(commandArgs);
 
@@ -229,8 +297,8 @@ public class GoogleDocMigration {
         }
 
         GoogleDocMigration migration =
-            new GoogleDocMigration(commandArgs.origUsername, commandArgs.origPassword, commandArgs.destUsername,
-                                   commandArgs.destPassword);
+            new GoogleDocMigration(commandArgs.origUsername, commandArgs.origPassword,
+                                   commandArgs.destUsername, commandArgs.destPassword);
 
         migration.migrateMyDocuments();
     }
