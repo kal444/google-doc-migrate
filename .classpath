@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<classpath>
+	<classpathentry kind="src" path="src"/>
+	<classpathentry kind="con" path="org.eclipse.jdt.launching.JRE_CONTAINER"/>
+	<classpathentry kind="lib" path="/home/kal/dev/lib/gdata/java/lib/gdata-core-1.0.jar"/>
+	<classpathentry kind="lib" path="/home/kal/dev/lib/gdata/java/lib/gdata-docs-meta-3.0.jar"/>
+	<classpathentry kind="lib" path="/home/kal/dev/lib/gdata/java/lib/gdata-media-1.0.jar"/>
+	<classpathentry kind="lib" path="/home/kal/dev/lib/gdata/java/lib/gdata-client-1.0.jar"/>
+	<classpathentry kind="lib" path="/home/kal/dev/lib/gdata/java/lib/gdata-client-meta-1.0.jar"/>
+	<classpathentry kind="lib" path="/home/kal/dev/lib/gdata/java/lib/gdata-docs-3.0.jar"/>
+	<classpathentry kind="lib" path="lib/jcommander-1.13.jar"/>
+	<classpathentry kind="lib" path="lib/slf4j-api-1.6.1.jar"/>
+	<classpathentry kind="lib" path="lib/log4j-1.2.16.jar"/>
+	<classpathentry kind="lib" path="lib/slf4j-log4j12-1.6.1.jar"/>
+	<classpathentry exported="true" kind="var" path="Google Data Plugin">
+		<attributes>
+			<attribute name="plugin_id" value="com.google.gdata"/>
+		</attributes>
+	</classpathentry>
+	<classpathentry kind="var" path="LOCAL_LIBS/javamail-1.4.4/lib/mailapi.jar"/>
+	<classpathentry kind="var" path="LOCAL_LIBS/guava-r08/guava-r08.jar"/>
+	<classpathentry kind="output" path="bin"/>
+</classpath>
