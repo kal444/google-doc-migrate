@@ -8,6 +8,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.net.MalformedURLException;
 import java.net.URL;
+import java.util.HashSet;
 import java.util.Set;
 import java.util.TreeSet;
 
@@ -25,6 +26,8 @@ import com.google.gdata.data.MediaContent;
 import com.google.gdata.data.PlainTextConstruct;
 import com.google.gdata.data.acl.AclEntry;
 import com.google.gdata.data.acl.AclFeed;
+import com.google.gdata.data.acl.AclRole;
+import com.google.gdata.data.acl.AclScope;
 import com.google.gdata.data.docs.DocumentEntry;
 import com.google.gdata.data.docs.DocumentListEntry;
 import com.google.gdata.data.docs.DocumentListFeed;
@@ -51,6 +54,10 @@ public class GoogleDocMigration {
     private static final String DOCS_OWNED_BY_ME = DOC_FEED_ROOT + "-/mine";
 
     private static final String DOCS_SHARED_WITH_ME = DOC_FEED_ROOT + "-/-mine";
+
+    private String origUsername;
+
+    private String destUsername;
 
     private DocsService origDocsService;
 
@@ -81,12 +88,17 @@ public class GoogleDocMigration {
                     LOG.info("folders: " + folders);
                 }
 
+                Set<AclHolder> aclHolders = new HashSet<AclHolder>();
                 AclFeed aclFeed =
                     origDocsService.getFeed(new URL(entry.getAclFeedLink().getHref()),
                                             AclFeed.class);
                 for (AclEntry aclEntry : aclFeed.getEntries()) {
-                    LOG.info(format(" -acl role: %s -scope: %s(%s)", aclEntry.getRole().getValue(),
-                                    aclEntry.getScope().getValue(), aclEntry.getScope().getType()));
+                    AclHolder holder =
+                        new AclHolder(aclEntry.getScope().getType(), aclEntry.getRole().getValue(),
+                                      aclEntry.getScope().getValue());
+
+                    aclHolders.add(holder);
+                    LOG.info(holder.toString());
                 }
 
                 // migrate doc
@@ -106,6 +118,17 @@ public class GoogleDocMigration {
                 }
 
                 // update ACL
+                for (AclHolder holder : aclHolders) {
+                    // skip current user's ACL
+                    if (holder.getScope().equals(origUsername)) {
+                        continue;
+                    }
+                    addAclRole(new AclRole(holder.getRole()), new AclScope(holder.getType(),
+                                                                           holder.getScope()),
+                               newEntry);
+                }
+                addAclRole(new AclRole("writer"), new AclScope(AclScope.Type.USER, destUsername),
+                           newEntry);
 
                 // mark doc as done with a tag folder
                 newEntry = addToFolder(newEntry, createMigrationTagFolderIfNeeded());
@@ -119,6 +142,16 @@ public class GoogleDocMigration {
         } catch (ServiceException e) {
             e.printStackTrace();
         }
+    }
+
+    public AclEntry addAclRole(AclRole role, AclScope scope, DocumentListEntry entry)
+        throws IOException, MalformedURLException, ServiceException {
+
+        AclEntry aclEntry = new AclEntry();
+        aclEntry.setRole(role);
+        aclEntry.setScope(scope);
+
+        return origDocsService.insert(new URL(entry.getAclFeedLink().getHref()), aclEntry);
     }
 
     private DocumentListEntry createMigrationTagFolderIfNeeded() throws IOException,
@@ -149,8 +182,8 @@ public class GoogleDocMigration {
         return null;
     }
 
-    public DocumentListEntry addToFolder(DocumentListEntry sourceEntry,
-                                         DocumentListEntry destFolderEntry) throws IOException,
+    private DocumentListEntry addToFolder(DocumentListEntry sourceEntry,
+                                          DocumentListEntry destFolderEntry) throws IOException,
         MalformedURLException, ServiceException {
 
         DocumentListEntry newEntry = null;
@@ -213,8 +246,8 @@ public class GoogleDocMigration {
         return filepath;
     }
 
-    public DocumentListEntry uploadFile(String filepath, String title, URL uri) throws IOException,
-        ServiceException {
+    private DocumentListEntry uploadFile(String filepath, String title, URL uri)
+        throws IOException, ServiceException {
 
         File file = new File(filepath);
         DocumentListEntry newDocument = new DocumentListEntry();
@@ -261,6 +294,9 @@ public class GoogleDocMigration {
 
     public GoogleDocMigration(String origUsername, String origPassword, String destUsername,
                               String destPassword) {
+
+        this.origUsername = origUsername;
+        this.destUsername = destUsername;
 
         origDocsService = new DocsService("yellowaxe.com-GoogleDocMigration-v1");
         destDocsService = new DocsService("yellowaxe.com-GoogleDocMigration-v1");
