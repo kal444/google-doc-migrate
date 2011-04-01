@@ -54,6 +54,8 @@ public class GoogleDocMigration {
 
     public void migrateDocumentsSharedWithMe() {
 
+        testOnly = false;
+
         LOG.info("Migrating Documents Shared With Me");
 
         try {
@@ -116,6 +118,8 @@ public class GoogleDocMigration {
                 }
 
                 LOG.info("====");
+
+                break;
             }
         } catch (MalformedURLException e) {
             e.printStackTrace();
@@ -329,7 +333,7 @@ public class GoogleDocMigration {
                                    commandArgs.destUsername, commandArgs.destPassword,
                                    commandArgs.testOnly);
 
-        migration.migrateMyDocuments();
+        // migration.migrateMyDocuments();
         migration.migrateDocumentsSharedWithMe();
     }
 
