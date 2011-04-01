@@ -38,6 +38,12 @@ public class DocsServiceFacade {
     public static final String SPREADSHEET_EXPORT_URL_PATTERN =
         "https://spreadsheets.google.com/feeds/download/spreadsheets/Export?key=%s&exportFormat=xls";
 
+    public static final String DOCUMENT_EXPORT_URL_PATTERN =
+        "https://docs.google.com/feeds/download/documents/Export?docId=%s&exportFormat=doc";
+
+    public static final String PRESENTATION_EXPORT_URL_PATTERN =
+        "https://docs.google.com/feeds/download/presentations/Export?docId=%s&exportFormat=ppt";
+
     private static final Logger LOG = LoggerFactory.getLogger(DocsServiceFacade.class);
 
     private DocsService docsService;
@@ -73,7 +79,7 @@ public class DocsServiceFacade {
         } else if (docType.equals("folder")) {
             newEntry = new FolderEntry();
         } else {
-            newEntry = new DocumentListEntry(); // Unknown type
+            newEntry = new DocumentListEntry();
         }
         newEntry.setId(sourceEntry.getId());
 
@@ -82,8 +88,8 @@ public class DocsServiceFacade {
         return docsService.insert(new URL(destFolderUri), newEntry);
     }
 
-    public DocumentListEntry findOrCreateFolder(String folderName) throws MalformedURLException,
-        IOException, ServiceException {
+    public DocumentListEntry findOrCreateFolder(String folderName) throws IOException,
+        ServiceException {
 
         URL searchFeedUri = new URL(DOC_FEED_ROOT + "-/folder");
         DocumentQuery query = new DocumentQuery(searchFeedUri);
@@ -96,8 +102,7 @@ public class DocsServiceFacade {
             return createFolder(folderName);
     }
 
-    private DocumentListEntry createFolder(String folderName) throws MalformedURLException,
-        IOException, ServiceException {
+    private DocumentListEntry createFolder(String folderName) throws IOException, ServiceException {
 
         DocumentListEntry newEntry = new FolderEntry();
         newEntry.setTitle(new PlainTextConstruct(folderName));
@@ -108,7 +113,7 @@ public class DocsServiceFacade {
     }
 
     public AclEntry addAcl(AclRole role, AclScope scope, DocumentListEntry entry)
-        throws IOException, MalformedURLException, ServiceException {
+        throws IOException, ServiceException {
 
         AclEntry aclEntry = new AclEntry();
         aclEntry.setRole(role);
@@ -117,8 +122,7 @@ public class DocsServiceFacade {
         return docsService.insert(new URL(entry.getAclFeedLink().getHref()), aclEntry);
     }
 
-    public String downloadEntry(DocumentListEntry entry) throws MalformedURLException, IOException,
-        ServiceException {
+    public String downloadEntry(DocumentListEntry entry) throws IOException, ServiceException {
 
         String resourceId = entry.getResourceId();
         String docId = resourceId.substring(resourceId.lastIndexOf(":") + 1);
@@ -127,17 +131,16 @@ public class DocsServiceFacade {
         if (entryType.equals("spreadsheet"))
             return downloadSpreadsheet(docId);
         else if (entryType.equals("document"))
-            return null;
+            return downloadDocument(docId);
         else if (entryType.equals("presentation"))
-            return null;
+            return downloadPresentation(docId);
         else if (entryType.equals("pdf"))
-            return null;
+            return downloadPdf(entry);
         else
             return null;
     }
 
-    private String downloadSpreadsheet(String docId) throws IOException, MalformedURLException,
-        ServiceException {
+    private String downloadSpreadsheet(String docId) throws IOException, ServiceException {
 
         docsService.setUserToken(spreadsheetToken.getValue());
 
@@ -150,6 +153,28 @@ public class DocsServiceFacade {
         return filepath;
     }
 
+    private String downloadDocument(String docId) throws IOException, ServiceException {
+
+        String filepath = tempFile("temp.doc");
+        downloadFile(format(DOCUMENT_EXPORT_URL_PATTERN, docId), filepath);
+        return filepath;
+    }
+
+    private String downloadPresentation(String docId) throws IOException, ServiceException {
+
+        String filepath = tempFile("temp.ppt");
+        downloadFile(format(PRESENTATION_EXPORT_URL_PATTERN, docId), filepath);
+        return filepath;
+    }
+
+    private String downloadPdf(DocumentListEntry entry) throws IOException, ServiceException {
+
+        String exportUrl = ((MediaContent) entry.getContent()).getUri();
+        String filepath = tempFile("temp.pdf");
+        downloadFile(exportUrl, filepath);
+        return filepath;
+    }
+
     private String tempFile(String filename) {
 
         String filepath = System.getProperty("java.io.tmpdir") + "/" + filename;
@@ -157,7 +182,7 @@ public class DocsServiceFacade {
     }
 
     private void downloadFile(String exportUrl, String filepath) throws IOException,
-        MalformedURLException, ServiceException {
+        ServiceException {
 
         MediaContent mc = new MediaContent();
         mc.setUri(exportUrl);
@@ -200,6 +225,19 @@ public class DocsServiceFacade {
         }
 
         return newEntry;
+    }
+
+    public DocumentListEntry findEntryByName(String title) throws IOException, ServiceException {
+
+        URL searchFeedUri = new URL(DOC_FEED_ROOT);
+        DocumentQuery query = new DocumentQuery(searchFeedUri);
+        query.setTitleQuery(title);
+        query.setTitleExact(true);
+        DocumentListFeed searchFeed = docsService.getFeed(query, DocumentListFeed.class);
+        if (searchFeed.getEntries().size() == 1)
+            return searchFeed.getEntries().get(0);
+        else
+            return null;
     }
 
 }

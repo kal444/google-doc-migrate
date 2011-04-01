@@ -46,17 +46,85 @@ public class GoogleDocMigration {
 
     private DocsService origDocsService;
 
-    private DocsService destDocsService;
-
-    private UserToken origDocsServiceToken;
-
-    private UserToken origSpreadsheetToken;
-
     private DocsServiceFacade origDocsServiceFacade;
 
     private DocsServiceFacade destDocsServiceFacade;
 
     private boolean testOnly;
+
+    public void migrateDocumentsSharedWithMe() {
+
+        LOG.info("Migrating Documents Shared With Me");
+
+        try {
+            URL feedUri = new URL(DOCS_SHARED_WITH_ME);
+            DocumentListFeed feed = origDocsService.getFeed(feedUri, DocumentListFeed.class);
+            logEntries(feed);
+
+            for (DocumentListEntry entry : feed.getEntries()) {
+                logEntry(entry);
+
+                Set<String> folders = gatherFolders(entry);
+
+                // find the permission for the current user
+                AclHolder holder = null;
+                AclFeed aclFeed =
+                    origDocsService.getFeed(new URL(entry.getAclFeedLink().getHref()),
+                                            AclFeed.class);
+                for (AclEntry aclEntry : aclFeed.getEntries()) {
+                    if (aclEntry.getScope().getValue().equalsIgnoreCase(origUsername)) {
+                        // found the ACL we want to save
+                        holder =
+                            new AclHolder(aclEntry.getScope().getType(), aclEntry.getRole()
+                                .getValue(), aclEntry.getScope().getValue());
+                        LOG.info(holder.toString());
+                        break;
+                    }
+                }
+
+                // update permission if we can
+                if (entry.isWritersCanInvite() && holder != null
+                    && holder.getRole().equals(AclRole.WRITER.getValue())) {
+                    AclHolder newHolder =
+                        new AclHolder(AclScope.Type.USER, AclRole.WRITER.getValue(), destUsername);
+
+                    LOG.info("adding sharing for " + newHolder);
+                    if (!testOnly) {
+                        addAcl(entry, newHolder);
+                    }
+                } else {
+                    LOG.warn(format(
+                                    "Cannot change ACL for this entry [title: %s]. WritersCanInviteFlag is off or You aren't a writer",
+                                    entry.getTitle().getPlainText()));
+                }
+
+                // synchronizing folders
+                DocumentListEntry newEntry =
+                    destDocsServiceFacade.findEntryByName(entry.getTitle().getPlainText());
+                if (newEntry != null) {
+                    for (String folderName : folders) {
+                        LOG.debug("adding to folder: " + folderName);
+                        if (!testOnly) {
+                            newEntry = addToFolder(newEntry, folderName);
+                        }
+                    }
+                }
+
+                if (!testOnly) {
+                    // mark doc as done with a tag folder
+                    markMigrated(entry);
+                }
+
+                LOG.info("====");
+            }
+        } catch (MalformedURLException e) {
+            e.printStackTrace();
+        } catch (IOException e) {
+            e.printStackTrace();
+        } catch (ServiceException e) {
+            e.printStackTrace();
+        }
+    }
 
     public void migrateMyDocuments() {
 
@@ -65,40 +133,13 @@ public class GoogleDocMigration {
         try {
             URL feedUri = new URL(DOCS_OWNED_BY_ME);
             DocumentListFeed feed = origDocsService.getFeed(feedUri, DocumentListFeed.class);
-            LOG.info(format("Found %d documents to migrate", feed.getEntries().size()));
+            logEntries(feed);
 
             for (DocumentListEntry entry : feed.getEntries()) {
-                LOG.info(format("title: %s (%s)", entry.getTitle().getPlainText(),
-                                entry.getResourceId()));
+                logEntry(entry);
 
-                Set<String> folders = new TreeSet<String>();
-                for (Link parentLink : entry.getParentLinks()) {
-                    // saving the folders the doc is in
-                    folders.add(parentLink.getTitle());
-                }
-                if (!folders.isEmpty()) {
-                    LOG.info("folders: " + folders);
-                }
-
-                Set<AclHolder> aclHolders = new HashSet<AclHolder>();
-                AclFeed aclFeed =
-                    origDocsService.getFeed(new URL(entry.getAclFeedLink().getHref()),
-                                            AclFeed.class);
-                for (AclEntry aclEntry : aclFeed.getEntries()) {
-                    AclHolder holder =
-                        new AclHolder(aclEntry.getScope().getType(), aclEntry.getRole().getValue(),
-                                      aclEntry.getScope().getValue());
-
-                    // skip current user and destination user's ACL entries
-                    if (holder.getScope().equalsIgnoreCase(origUsername)
-                        || holder.getScope().equalsIgnoreCase(destUsername)) {
-                        continue;
-                    }
-
-                    // saving the ACL entry of this doc
-                    aclHolders.add(holder);
-                    LOG.info(holder.toString());
-                }
+                Set<String> folders = gatherFolders(entry);
+                Set<AclHolder> aclHolders = gatherAcls(entry);
 
                 // start migrating the doc
                 DocumentListEntry newEntry = null;
@@ -137,6 +178,53 @@ public class GoogleDocMigration {
         } catch (ServiceException e) {
             e.printStackTrace();
         }
+    }
+
+    private Set<AclHolder> gatherAcls(DocumentListEntry entry) throws IOException,
+        ServiceException, MalformedURLException {
+
+        Set<AclHolder> aclHolders = new HashSet<AclHolder>();
+        AclFeed aclFeed =
+            origDocsService.getFeed(new URL(entry.getAclFeedLink().getHref()), AclFeed.class);
+        for (AclEntry aclEntry : aclFeed.getEntries()) {
+            AclHolder holder =
+                new AclHolder(aclEntry.getScope().getType(), aclEntry.getRole().getValue(),
+                              aclEntry.getScope().getValue());
+
+            // skip current user and destination user's ACL entries
+            if (holder.getScope().equalsIgnoreCase(origUsername)
+                || holder.getScope().equalsIgnoreCase(destUsername)) {
+                continue;
+            }
+
+            // saving the ACL entry of this doc
+            aclHolders.add(holder);
+            LOG.info(holder.toString());
+        }
+        return aclHolders;
+    }
+
+    private Set<String> gatherFolders(DocumentListEntry entry) {
+
+        Set<String> folders = new TreeSet<String>();
+        for (Link parentLink : entry.getParentLinks()) {
+            // saving the folders the doc is in
+            folders.add(parentLink.getTitle());
+        }
+        if (!folders.isEmpty()) {
+            LOG.info("folders: " + folders);
+        }
+        return folders;
+    }
+
+    private void logEntries(DocumentListFeed feed) {
+
+        LOG.info(format("Found %d documents to migrate", feed.getEntries().size()));
+    }
+
+    private void logEntry(DocumentListEntry entry) {
+
+        LOG.info(format("title: %s (%s)", entry.getTitle().getPlainText(), entry.getResourceId()));
     }
 
     private DocumentListEntry markMigrated(DocumentListEntry entry) throws MalformedURLException,
@@ -198,7 +286,7 @@ public class GoogleDocMigration {
         this.destUsername = destUsername;
 
         origDocsService = new DocsService("yellowaxe.com-GoogleDocMigration-v1");
-        destDocsService = new DocsService("yellowaxe.com-GoogleDocMigration-v1");
+        DocsService destDocsService = new DocsService("yellowaxe.com-GoogleDocMigration-v1");
 
         try {
             origDocsService.setUserCredentials(origUsername, origPassword);
@@ -208,11 +296,12 @@ public class GoogleDocMigration {
             SpreadsheetService origSpreadsheetService =
                 new SpreadsheetService("yellowaxe.com-GoogleDocMigration-v1");
             origSpreadsheetService.setUserCredentials(origUsername, origPassword);
-            origSpreadsheetToken =
+            UserToken origSpreadsheetToken =
                 (UserToken) origSpreadsheetService.getAuthTokenFactory().getAuthToken();
 
             // save the docs service token as well
-            origDocsServiceToken = (UserToken) origDocsService.getAuthTokenFactory().getAuthToken();
+            UserToken origDocsServiceToken =
+                (UserToken) origDocsService.getAuthTokenFactory().getAuthToken();
 
             origDocsServiceFacade =
                 new DocsServiceFacade(origDocsService, origDocsServiceToken, origSpreadsheetToken);
@@ -241,6 +330,7 @@ public class GoogleDocMigration {
                                    commandArgs.testOnly);
 
         migration.migrateMyDocuments();
+        migration.migrateDocumentsSharedWithMe();
     }
 
 }
