@@ -16,4 +16,6 @@ public class CommandArgs {
     @Parameter(names = "-dp", description = "Destination Google Account's Password", required = true)
     public String destPassword;
 
+    @Parameter(names = "-t", description = "Test Only - does not perform any actions")
+    public boolean testOnly;
 }
