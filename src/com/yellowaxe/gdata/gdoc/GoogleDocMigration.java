@@ -8,9 +8,13 @@ import java.net.URL;
 import java.util.HashSet;
 import java.util.Set;
 import java.util.TreeSet;
+import java.util.logging.Handler;
+import java.util.logging.Level;
+import java.util.logging.LogManager;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.slf4j.bridge.SLF4JBridgeHandler;
 
 import com.beust.jcommander.JCommander;
 import com.beust.jcommander.ParameterException;
@@ -52,9 +56,11 @@ public class GoogleDocMigration {
 
     private boolean testOnly;
 
+    /**
+     * DOES NOT WORK - adding permission to the ACL if you aren't the owner
+     * doesn't seem to work. Even if the writerCanInvite bit is set.
+     */
     public void migrateDocumentsSharedWithMe() {
-
-        testOnly = false;
 
         LOG.info("Migrating Documents Shared With Me");
 
@@ -118,8 +124,6 @@ public class GoogleDocMigration {
                 }
 
                 LOG.info("====");
-
-                break;
             }
         } catch (MalformedURLException e) {
             e.printStackTrace();
@@ -318,6 +322,17 @@ public class GoogleDocMigration {
 
     public static void main(String[] args) {
 
+        // Clear all JUL logging handlers
+        java.util.logging.Logger rootLogger = LogManager.getLogManager().getLogger("");
+        Handler[] handlers = rootLogger.getHandlers();
+        for (Handler handler : handlers) {
+            rootLogger.removeHandler(handler);
+        }
+        rootLogger.setLevel(Level.ALL);
+
+        // install bridge since gdata uses JUL
+        SLF4JBridgeHandler.install();
+
         CommandArgs commandArgs = new CommandArgs();
         JCommander optParser = new JCommander(commandArgs);
 
@@ -333,8 +348,8 @@ public class GoogleDocMigration {
                                    commandArgs.destUsername, commandArgs.destPassword,
                                    commandArgs.testOnly);
 
-        // migration.migrateMyDocuments();
-        migration.migrateDocumentsSharedWithMe();
+        migration.migrateMyDocuments();
+        // migration.migrateDocumentsSharedWithMe();
     }
 
 }
