@@ -5,7 +5,9 @@ import static java.lang.String.format;
 import java.io.IOException;
 import java.net.MalformedURLException;
 import java.net.URL;
+import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.logging.Handler;
@@ -56,6 +58,50 @@ public class GoogleDocMigration {
 
     private boolean testOnly;
 
+    private List<DocumentListEntry> failedEntries = new ArrayList<DocumentListEntry>();
+
+    public void migrateMyDocuments() {
+
+        LOG.info("Migrating Documents Owned By Me");
+
+        try {
+            URL feedUri = new URL(DOCS_OWNED_BY_ME);
+            DocumentListFeed feed = origDocsService.getFeed(feedUri, DocumentListFeed.class);
+            logEntries(feed);
+
+            for (DocumentListEntry entry : feed.getEntries()) {
+                try {
+                    logEntry(entry);
+
+                    Set<String> folders = gatherAllFolders(entry);
+                    if (folders.contains(MIGRATION_TAG_FOLDER_NAME)) {
+                        LOG.info("already migrated, skipping...");
+                        continue;
+                    }
+
+                    Set<AclHolder> aclHolders = gatherAllAcls(entry);
+
+                    DocumentListEntry newEntry = copyEntry(entry);
+                    newEntry = copyMetadata(entry, newEntry);
+                    newEntry = synchronizeFolders(folders, newEntry);
+                    synchronizeAcls(aclHolders, newEntry);
+                    markMigrated(entry);
+
+                    LOG.info("====");
+                } catch (Exception e) {
+                    // continue to next entry
+                    failedEntries.add(entry);
+                    e.printStackTrace();
+                    continue;
+                }
+            }
+        } catch (IOException e) {
+            e.printStackTrace();
+        } catch (ServiceException e) {
+            e.printStackTrace();
+        }
+    }
+
     /**
      * DOES NOT WORK - adding permission to the ACL if you aren't the owner
      * doesn't seem to work. Even if the writerCanInvite bit is set.
@@ -70,63 +116,44 @@ public class GoogleDocMigration {
             logEntries(feed);
 
             for (DocumentListEntry entry : feed.getEntries()) {
-                logEntry(entry);
+                try {
+                    logEntry(entry);
 
-                Set<String> folders = gatherFolders(entry);
-
-                // find the permission for the current user
-                AclHolder holder = null;
-                AclFeed aclFeed =
-                    origDocsService.getFeed(new URL(entry.getAclFeedLink().getHref()),
-                                            AclFeed.class);
-                for (AclEntry aclEntry : aclFeed.getEntries()) {
-                    if (aclEntry.getScope().getValue().equalsIgnoreCase(origUsername)) {
-                        // found the ACL we want to save
-                        holder =
-                            new AclHolder(aclEntry.getScope().getType(), aclEntry.getRole()
-                                .getValue(), aclEntry.getScope().getValue());
-                        LOG.info(holder.toString());
-                        break;
+                    Set<String> folders = gatherAllFolders(entry);
+                    if (folders.contains(MIGRATION_TAG_FOLDER_NAME)) {
+                        LOG.info("already migrated, skipping...");
+                        continue;
                     }
-                }
 
-                // update permission if we can
-                if (entry.isWritersCanInvite() && holder != null
-                    && holder.getRole().equals(AclRole.WRITER.getValue())) {
-                    AclHolder newHolder =
-                        new AclHolder(AclScope.Type.USER, AclRole.WRITER.getValue(), destUsername);
-
-                    LOG.info("adding sharing for " + newHolder);
-                    if (!testOnly) {
-                        addAcl(entry, newHolder);
+                    AclFeed aclFeed =
+                        origDocsService.getFeed(new URL(entry.getAclFeedLink().getHref()),
+                                                AclFeed.class);
+                    AclHolder holder = findSharingAclFor(origUsername, aclFeed);
+                    if (holder == null) {
+                        // something isn't right
+                        LOG.error("Unable to find your permission");
+                        failedEntries.add(entry);
+                        continue;
                     }
-                } else {
-                    LOG.warn(format(
-                                    "Cannot change ACL for this entry [title: %s]. WritersCanInviteFlag is off or You aren't a writer",
-                                    entry.getTitle().getPlainText()));
-                }
+                    updateSharingAclTo(destUsername, entry, holder);
 
-                // synchronizing folders
-                DocumentListEntry newEntry =
-                    destDocsServiceFacade.findEntryByName(entry.getTitle().getPlainText());
-                if (newEntry != null) {
-                    for (String folderName : folders) {
-                        LOG.debug("adding to folder: " + folderName);
-                        if (!testOnly) {
-                            newEntry = addToFolder(newEntry, folderName);
-                        }
+                    // synchronizing folders for shared Doc
+                    DocumentListEntry newEntry =
+                        destDocsServiceFacade.findEntryByName(entry.getTitle().getPlainText());
+                    if (newEntry != null) {
+                        newEntry = synchronizeFolders(folders, newEntry);
                     }
-                }
 
-                if (!testOnly) {
-                    // mark doc as done with a tag folder
                     markMigrated(entry);
-                }
 
-                LOG.info("====");
+                    LOG.info("====");
+                } catch (Exception e) {
+                    // continue to next entry
+                    failedEntries.add(entry);
+                    e.printStackTrace();
+                    continue;
+                }
             }
-        } catch (MalformedURLException e) {
-            e.printStackTrace();
         } catch (IOException e) {
             e.printStackTrace();
         } catch (ServiceException e) {
@@ -134,61 +161,64 @@ public class GoogleDocMigration {
         }
     }
 
-    public void migrateMyDocuments() {
+    private void updateSharingAclTo(String username, DocumentListEntry entry, AclHolder holder)
+        throws IOException, MalformedURLException, ServiceException {
 
-        LOG.info("Migrating Documents Owned By Me");
+        if (entry.isWritersCanInvite() && holder != null
+            && holder.getRole().equals(AclRole.WRITER.getValue())) {
+            AclHolder newHolder =
+                new AclHolder(AclScope.Type.USER, AclRole.WRITER.getValue(), username);
 
-        try {
-            URL feedUri = new URL(DOCS_OWNED_BY_ME);
-            DocumentListFeed feed = origDocsService.getFeed(feedUri, DocumentListFeed.class);
-            logEntries(feed);
-
-            for (DocumentListEntry entry : feed.getEntries()) {
-                logEntry(entry);
-
-                Set<String> folders = gatherFolders(entry);
-                Set<AclHolder> aclHolders = gatherAcls(entry);
-
-                // start migrating the doc
-                DocumentListEntry newEntry = null;
-                if (!testOnly) {
-                    newEntry = copyEntry(entry);
-                    newEntry = copyMetadata(entry, newEntry);
-                }
-
-                // synchronize folders
-                for (String folderName : folders) {
-                    LOG.debug("adding to folder: " + folderName);
-                    if (!testOnly) {
-                        newEntry = addToFolder(newEntry, folderName);
-                    }
-                }
-
-                // update ACL
-                for (AclHolder holder : aclHolders) {
-                    LOG.info("adding sharing for " + holder);
-                    if (!testOnly) {
-                        addAcl(newEntry, holder);
-                    }
-                }
-
-                // mark doc as done with a tag folder
-                if (!testOnly) {
-                    markMigrated(entry);
-                }
-
-                LOG.info("====");
-            }
-        } catch (MalformedURLException e) {
-            e.printStackTrace();
-        } catch (IOException e) {
-            e.printStackTrace();
-        } catch (ServiceException e) {
-            e.printStackTrace();
+            LOG.info("adding sharing for " + newHolder);
+            addAcl(entry, newHolder);
+        } else {
+            LOG.warn(format(
+                            "Cannot change ACL for this entry [title: %s]. WritersCanInviteFlag is off or You aren't a writer",
+                            entry.getTitle().getPlainText()));
+            failedEntries.add(entry);
         }
     }
 
-    private Set<AclHolder> gatherAcls(DocumentListEntry entry) throws IOException,
+    private AclHolder findSharingAclFor(String username, AclFeed aclFeed) {
+
+        AclHolder holder = null;
+        for (AclEntry aclEntry : aclFeed.getEntries()) {
+            if (aclEntry.getScope().getValue().equalsIgnoreCase(username)) {
+                // found the ACL we want to save
+                holder =
+                    new AclHolder(aclEntry.getScope().getType(), aclEntry.getRole().getValue(),
+                                  aclEntry.getScope().getValue());
+                LOG.info(holder.toString());
+                break;
+            }
+        }
+        return holder;
+    }
+
+    private void synchronizeAcls(Set<AclHolder> aclHolders, DocumentListEntry newEntry)
+        throws IOException, MalformedURLException, ServiceException {
+
+        for (AclHolder holder : aclHolders) {
+            LOG.info("adding sharing for " + holder);
+            addAcl(newEntry, holder);
+        }
+    }
+
+    private DocumentListEntry synchronizeFolders(Set<String> folders, DocumentListEntry entry)
+        throws IOException, MalformedURLException, ServiceException {
+
+        DocumentListEntry newEntry = entry;
+
+        for (String folderName : folders) {
+            LOG.debug("adding to folder: " + folderName);
+            if (isNotATest()) {
+                newEntry = addToFolder(entry, folderName);
+            }
+        }
+        return newEntry;
+    }
+
+    private Set<AclHolder> gatherAllAcls(DocumentListEntry entry) throws IOException,
         ServiceException, MalformedURLException {
 
         Set<AclHolder> aclHolders = new HashSet<AclHolder>();
@@ -212,7 +242,7 @@ public class GoogleDocMigration {
         return aclHolders;
     }
 
-    private Set<String> gatherFolders(DocumentListEntry entry) {
+    private Set<String> gatherAllFolders(DocumentListEntry entry) {
 
         Set<String> folders = new TreeSet<String>();
         for (Link parentLink : entry.getParentLinks()) {
@@ -238,27 +268,40 @@ public class GoogleDocMigration {
     private DocumentListEntry markMigrated(DocumentListEntry entry) throws MalformedURLException,
         IOException, ServiceException {
 
-        DocsServiceFacade service = origDocsServiceFacade;
-        return service.addToFolder(entry, service.findOrCreateFolder(MIGRATION_TAG_FOLDER_NAME));
+        DocumentListEntry newEntry = entry;
+
+        if (isNotATest()) {
+            DocsServiceFacade service = origDocsServiceFacade;
+            newEntry =
+                service.addToFolder(entry, service.findOrCreateFolder(MIGRATION_TAG_FOLDER_NAME));
+        }
+        return newEntry;
     }
 
     private DocumentListEntry copyMetadata(DocumentListEntry entry, DocumentListEntry newEntry)
         throws IOException, ServiceException {
 
-        newEntry.setTitle(new PlainTextConstruct(entry.getTitle().getPlainText()));
-        newEntry.setStarred(entry.isStarred());
-        newEntry.setHidden(entry.isHidden());
-        newEntry.setWritersCanInvite(entry.isWritersCanInvite());
-        newEntry = newEntry.update();
-        return newEntry;
+        if (isNotATest()) {
+            newEntry.setTitle(new PlainTextConstruct(entry.getTitle().getPlainText()));
+            newEntry.setStarred(entry.isStarred());
+            newEntry.setHidden(entry.isHidden());
+            newEntry.setWritersCanInvite(entry.isWritersCanInvite());
+            return newEntry.update();
+        }
+
+        return entry;
     }
 
     private DocumentListEntry copyEntry(DocumentListEntry entry) throws IOException,
         ServiceException, MalformedURLException {
 
-        DocumentListEntry newEntry =
-            destDocsServiceFacade.uploadFile(origDocsServiceFacade.downloadEntry(entry),
-                                             TEMP_TITLE, rootUri());
+        DocumentListEntry newEntry = entry;
+
+        if (isNotATest()) {
+            newEntry =
+                destDocsServiceFacade.uploadFile(origDocsServiceFacade.downloadEntry(entry),
+                                                 TEMP_TITLE, rootUri());
+        }
         return newEntry;
     }
 
@@ -270,8 +313,16 @@ public class GoogleDocMigration {
     private void addAcl(DocumentListEntry newEntry, AclHolder holder) throws IOException,
         MalformedURLException, ServiceException {
 
-        destDocsServiceFacade.addAcl(new AclRole(holder.getRole()),
-                                     new AclScope(holder.getType(), holder.getScope()), newEntry);
+        if (isNotATest()) {
+            destDocsServiceFacade.addAcl(new AclRole(holder.getRole()),
+                                         new AclScope(holder.getType(), holder.getScope()),
+                                         newEntry);
+        }
+    }
+
+    private boolean isNotATest() {
+
+        return !testOnly;
     }
 
     private DocumentListEntry addToFolder(DocumentListEntry newEntry, String folderName)
@@ -281,11 +332,22 @@ public class GoogleDocMigration {
         return service.addToFolder(newEntry, service.findOrCreateFolder(folderName));
     }
 
+    private void showFailed() {
+
+        if (failedEntries.isEmpty())
+            return;
+
+        LOG.warn(format("The following %d documents were NOT migrated due to various errors",
+                        failedEntries.size()));
+        for (DocumentListEntry entry : failedEntries) {
+            logEntry(entry);
+        }
+    }
+
     public GoogleDocMigration(String origUsername, String origPassword, String destUsername,
                               String destPassword, boolean testOnly) {
 
         this.testOnly = testOnly;
-
         if (testOnly) {
             LOG.warn("********** TEST MODE - NO ACTION IS DONE **********");
         }
@@ -349,7 +411,10 @@ public class GoogleDocMigration {
                                    commandArgs.testOnly);
 
         migration.migrateMyDocuments();
-        // migration.migrateDocumentsSharedWithMe();
+        migration.migrateDocumentsSharedWithMe();
+        LOG.info("ALL DONE!");
+
+        migration.showFailed();
     }
 
 }

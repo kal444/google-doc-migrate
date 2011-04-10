@@ -30,6 +30,11 @@ import com.google.gdata.data.docs.SpreadsheetEntry;
 import com.google.gdata.data.media.MediaSource;
 import com.google.gdata.util.ServiceException;
 
+/**
+ * @author Kyle Huang
+ * 
+ *         Makes accessing the Doc List API easier.
+ */
 public class DocsServiceFacade {
 
     public static final String DOC_FEED_ROOT =

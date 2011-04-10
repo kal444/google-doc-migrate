@@ -1,1 +1,10 @@
-Something here...
+This basically take the documents from one google doc account and move it to another. 
+It does this by downloading and re-uploading the document. 
+It's not terribly efficient as it work on the files one by one.
+
+There is also logic to attempt to update the sharing of documents shared to you as a writer. 
+But it appears that the service isn't supported for that right now. 
+I've opened an issue with the google doc api and will see if it gets fixed.
+
+The nice thing with this tool is that it will create a folder that tags the migrated docs. 
+So it won't try to migrate them if you execute the tool additional times.
